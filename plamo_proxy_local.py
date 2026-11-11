@@ -7,7 +7,7 @@
   "[plamo-translate]" system メッセージ形式で target_lang / glossary / context を渡す
 - %s / §c / {0} / 改行 をマスクして壊れないように保護
 - 用語集はその行の原文に出てくる語だけを渡す（コンテキスト節約・精度向上）
-- /v1/models 対応、任意の API キー認証、requests.jsonl に記録
+- /v1/models 対応、任意の API キー認証
 
 使い方:
   1. LM Studio で plamo-3-translate を読み込み、サーバーを起動 (:1234)
@@ -16,13 +16,10 @@
 
 標準ライブラリのみ。
 """
-import datetime
 import hmac
 import json
-import os
 import re
 import sys
-import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -40,7 +37,6 @@ TEMPERATURE = 0.0
 TIMEOUT = 120
 FORM = ""  # "", "plain", "polite"（日本語訳のときのみ）
 GLOSSARY_FILTER = True  # 原文に出てくる用語だけ渡す
-LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requests.jsonl")
 # ================
 
 LANG = {"zh_cn": "zh-hans", "zh_tw": "zh-hant", "zh_hk": "zh-hant"}
@@ -58,18 +54,6 @@ FULLWIDTH = str.maketrans({"｛": "{", "｝": "}", "０": "0", "１": "1", "２"
 
 def log(*a):
     print(time.strftime("%H:%M:%S"), *a, file=sys.stderr, flush=True)
-
-
-_log_lock = threading.Lock()
-
-
-def record(req, res, code):
-    entry = {"time": datetime.datetime.now().isoformat(timespec="seconds"), "status": code,
-             "request": req, "response": res}
-    line = json.dumps(entry, ensure_ascii=False) + "\n"
-    with _log_lock:  # 同時に終わった要求の行が混ざらないようにする
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(line)
 
 
 def number_s(src: str) -> str:
@@ -265,7 +249,6 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.authed():
             return
-        req = None
         try:
             req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             if req.get("stream"):
@@ -274,10 +257,6 @@ class H(BaseHTTPRequestHandler):
         except Exception as ex:  # noqa: BLE001
             log(f"[BAD REQUEST] {ex}")
             res, code = {"error": {"message": str(ex)}}, 400
-        try:
-            record(req, res, code)
-        except Exception as ex:  # noqa: BLE001
-            log(f"[LOG ERROR] {ex}")
         self.send_json(code, res)
 
     def log_message(self, *a):
@@ -298,13 +277,12 @@ def parse_args():
     p.add_argument("--timeout", type=int, default=TIMEOUT, help=f"1件あたりのタイムアウト秒 (既定: {TIMEOUT})")
     p.add_argument("--form", choices=["", "plain", "polite"], default=FORM, help="日本語の文体 plain=だ・である / polite=です・ます (既定: モデル任せ)")
     p.add_argument("--no-glossary-filter", action="store_true", help="用語集を絞り込まず毎回全部渡す")
-    p.add_argument("--log-file", default=LOG_FILE, help="記録ファイル (既定: スクリプトと同じフォルダの requests.jsonl)")
     a = p.parse_args()
     g = globals()
     g.update(UPSTREAM=a.upstream.rstrip("/").removesuffix("/v1"), LISTEN_HOST=a.host, LISTEN_PORT=a.port,
              PLAMO_MODEL=a.model, PARALLEL=max(1, a.parallel), API_KEY=a.api_key, MAX_TOKENS=a.max_tokens,
              TEMPERATURE=a.temperature, TIMEOUT=a.timeout, FORM=a.form,
-             GLOSSARY_FILTER=not a.no_glossary_filter, LOG_FILE=a.log_file)
+             GLOSSARY_FILTER=not a.no_glossary_filter)
 
 
 if __name__ == "__main__":
@@ -313,5 +291,5 @@ if __name__ == "__main__":
         detect_model()
     except Exception as ex:  # noqa: BLE001
         log(f"[WARN] LM Studio に接続できません（起動後に自動で再試行します）: {ex}")
-    log(f"listening http://{LISTEN_HOST}:{LISTEN_PORT}/v1 -> {UPSTREAM}  (log: {LOG_FILE})")
+    log(f"listening http://{LISTEN_HOST}:{LISTEN_PORT}/v1 -> {UPSTREAM}")
     ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), H).serve_forever()
