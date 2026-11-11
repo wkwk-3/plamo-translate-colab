@@ -17,10 +17,12 @@
 標準ライブラリのみ。
 """
 import datetime
+import hmac
 import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -58,11 +60,16 @@ def log(*a):
     print(time.strftime("%H:%M:%S"), *a, file=sys.stderr, flush=True)
 
 
+_log_lock = threading.Lock()
+
+
 def record(req, res, code):
     entry = {"time": datetime.datetime.now().isoformat(timespec="seconds"), "status": code,
              "request": req, "response": res}
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
+    with _log_lock:  # 同時に終わった要求の行が混ざらないようにする
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
 
 
 def number_s(src: str) -> str:
@@ -229,7 +236,8 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def authed(self):
-        if API_KEY and self.headers.get("Authorization", "") != f"Bearer {API_KEY}":
+        given = self.headers.get("Authorization", "").encode("utf-8", "surrogateescape")
+        if API_KEY and not hmac.compare_digest(given, f"Bearer {API_KEY}".encode()):
             self.send_json(401, {"error": {"message": "Invalid API key", "type": "invalid_request_error"}})
             return False
         return True
